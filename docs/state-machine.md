@@ -73,6 +73,7 @@ Design notes:
 
 - **Triage (`Inbox → Backlog`) and scheduling (`Backlog → Ready`) are human-only** in this draft. The pre-execution pipeline is the human's planning space — it is where the "spend more time or offload?" decision happens, so an agent doesn't get to make it. Agents participate by *proposing*: creating cards in Inbox and annotating existing ones. Flagged in Open Questions in case this proves too much friction.
 - **A request that violates these rules must fail closed (403)** — e.g. an agent trying to transition a card it doesn't execute, or trying to touch `Done` — never be silently coerced into an allowed transition.
+- **Editing a card's definition (title/description) is human-only**, and terminal cards are frozen. The definition is what the human triages and reviews — and, for an `auto` card, what the grant covers — so an agent rewriting it would hollow out the review gate. Agents propose edits via annotation.
 
 ## Progress notes and suggested next steps
 

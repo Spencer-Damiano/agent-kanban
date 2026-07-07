@@ -1,0 +1,334 @@
+/**
+ * REST surface over CardStore. Routes stay thin: resolve the actor, call the
+ * store, return the result. Every permission rule lives in the domain core /
+ * store, which throws typed errors the app-level handler maps to responses
+ * (PermissionError → 403, NotFoundError → 404, ValidationError → 400,
+ * UnauthorizedError → 401) — a disallowed request fails closed, never gets
+ * coerced.
+ *
+ * Shape: resource routes for the card itself, action sub-routes for the
+ * audited acts (transition, executor, review-policy, annotations). The
+ * OpenAPI spec is generated from these route schemas (served at
+ * /openapi.json), so the schemas are the API contract — keep them honest.
+ */
+
+import type { FastifyInstance } from "fastify";
+import {
+  CARD_STATES,
+  type CardState,
+  type ExecutorType,
+  type ReviewPolicy,
+} from "../domain/state-machine.js";
+import { EVENT_TYPES, type CardStore } from "../persistence/card-store.js";
+import { NotFoundError } from "../persistence/card-store.js";
+import { resolveActor } from "./actor.js";
+
+const EXECUTORS = ["human", "agent", "unassigned"] as const;
+const REVIEW_POLICIES = ["reviewed", "auto"] as const;
+
+const cardSchema = {
+  $id: "Card",
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    title: { type: "string" },
+    description: { type: "string" },
+    state: { type: "string", enum: [...CARD_STATES] },
+    executor: { type: "string", enum: [...EXECUTORS] },
+    reviewPolicy: { type: "string", enum: [...REVIEW_POLICIES] },
+    pausedFrom: { type: ["string", "null"], enum: [...CARD_STATES, null] },
+    createdAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+  },
+  required: [
+    "id",
+    "title",
+    "description",
+    "state",
+    "executor",
+    "reviewPolicy",
+    "pausedFrom",
+    "createdAt",
+    "updatedAt",
+  ],
+} as const;
+
+const eventSchema = {
+  $id: "CardEvent",
+  type: "object",
+  properties: {
+    id: { type: "integer" },
+    cardId: { type: "string", format: "uuid" },
+    type: { type: "string", enum: [...EVENT_TYPES] },
+    actorId: { type: "string" },
+    actorType: { type: "string", enum: ["human", "agent", "system"] },
+    fromState: { type: ["string", "null"], enum: [...CARD_STATES, null] },
+    toState: { type: ["string", "null"], enum: [...CARD_STATES, null] },
+    executor: { type: "string", enum: [...EXECUTORS] },
+    reviewPolicy: { type: "string", enum: [...REVIEW_POLICIES] },
+    note: { type: ["string", "null"] },
+    payload: { type: ["object", "null"], additionalProperties: true },
+    createdAt: { type: "string", format: "date-time" },
+  },
+  required: [
+    "id",
+    "cardId",
+    "type",
+    "actorId",
+    "actorType",
+    "fromState",
+    "toState",
+    "executor",
+    "reviewPolicy",
+    "note",
+    "payload",
+    "createdAt",
+  ],
+} as const;
+
+const errorSchema = {
+  $id: "Error",
+  type: "object",
+  properties: { error: { type: "string" } },
+  required: ["error"],
+} as const;
+
+/** Shared schemas referenced by $ref; the app adds these at the root so both validation and the OpenAPI generator can resolve them. */
+export const apiSchemas = [cardSchema, eventSchema, errorSchema];
+
+const idParams = {
+  type: "object",
+  properties: { id: { type: "string" } },
+  required: ["id"],
+} as const;
+
+/** Standard error responses for a mutating route on an existing card. */
+const mutationErrors = {
+  400: { $ref: "Error#" },
+  401: { $ref: "Error#" },
+  403: { $ref: "Error#" },
+  404: { $ref: "Error#" },
+} as const;
+
+export interface CardRoutesOptions {
+  store: CardStore;
+}
+
+export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions): Promise<void> {
+  const { store } = opts;
+
+  app.post<{ Body: { title: string; description?: string } }>(
+    "/cards",
+    {
+      schema: {
+        summary: "Create a card (into inbox)",
+        description: "Human capture or agent-proposed work. The card starts untriaged in inbox.",
+        body: {
+          type: "object",
+          properties: {
+            title: { type: "string", minLength: 1 },
+            description: { type: "string" },
+          },
+          required: ["title"],
+          additionalProperties: false,
+        },
+        response: { 201: { $ref: "Card#" }, 400: { $ref: "Error#" }, 401: { $ref: "Error#" }, 403: { $ref: "Error#" } },
+      },
+    },
+    async (request, reply) => {
+      const card = store.createCard(request.body, resolveActor(request));
+      return reply.code(201).send(card);
+    },
+  );
+
+  app.get<{ Querystring: { state?: CardState; executor?: ExecutorType } }>(
+    "/cards",
+    {
+      schema: {
+        summary: "List cards, optionally filtered by state and/or executor",
+        querystring: {
+          type: "object",
+          properties: {
+            state: { type: "string", enum: [...CARD_STATES] },
+            executor: { type: "string", enum: [...EXECUTORS] },
+          },
+          additionalProperties: false,
+        },
+        response: { 200: { type: "array", items: { $ref: "Card#" } }, 400: { $ref: "Error#" } },
+      },
+    },
+    async (request) => store.listCards(request.query),
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/cards/:id",
+    {
+      schema: {
+        summary: "Fetch a card",
+        params: idParams,
+        response: { 200: { $ref: "Card#" }, 404: { $ref: "Error#" } },
+      },
+    },
+    async (request) => {
+      const card = store.getCard(request.params.id);
+      if (card === undefined) throw new NotFoundError(`no card with id ${request.params.id}`);
+      return card;
+    },
+  );
+
+  app.patch<{ Params: { id: string }; Body: { title?: string; description?: string } }>(
+    "/cards/:id",
+    {
+      schema: {
+        summary: "Edit a card's title/description (human-only)",
+        description:
+          "The card definition is what the human triages and reviews — and, for auto cards, what the grant covers — so agents may not rewrite it; they propose edits via annotation.",
+        params: idParams,
+        body: {
+          type: "object",
+          properties: {
+            title: { type: "string", minLength: 1 },
+            description: { type: "string" },
+          },
+          minProperties: 1,
+          additionalProperties: false,
+        },
+        response: { 200: { $ref: "Card#" }, ...mutationErrors },
+      },
+    },
+    async (request) => store.updateCard(request.params.id, request.body, resolveActor(request)),
+  );
+
+  app.post<{ Params: { id: string }; Body: { to: CardState; note?: string } }>(
+    "/cards/:id/transition",
+    {
+      schema: {
+        summary: "Move a card to a new state",
+        description:
+          "Consults the domain state machine and fails closed (403) on anything it disallows. Some transitions require a note (400 without one): an agent entering manual_review or blocked, an agent auto-closing, and every review outcome.",
+        params: idParams,
+        body: {
+          type: "object",
+          properties: {
+            to: { type: "string", enum: [...CARD_STATES] },
+            note: { type: "string" },
+          },
+          required: ["to"],
+          additionalProperties: false,
+        },
+        response: { 200: { $ref: "Card#" }, ...mutationErrors },
+      },
+    },
+    async (request) =>
+      store.transitionCard(
+        request.params.id,
+        request.body.to,
+        resolveActor(request),
+        request.body.note,
+      ),
+  );
+
+  app.post<{ Params: { id: string }; Body: { executor: ExecutorType; note?: string } }>(
+    "/cards/:id/executor",
+    {
+      schema: {
+        summary: "Assign or reassign the card's executor (human-only)",
+        description: "Offloading a card to an agent, or taking it back, is always the human's act.",
+        params: idParams,
+        body: {
+          type: "object",
+          properties: {
+            executor: { type: "string", enum: [...EXECUTORS] },
+            note: { type: "string" },
+          },
+          required: ["executor"],
+          additionalProperties: false,
+        },
+        response: { 200: { $ref: "Card#" }, ...mutationErrors },
+      },
+    },
+    async (request) =>
+      store.setExecutor(
+        request.params.id,
+        request.body.executor,
+        resolveActor(request),
+        request.body.note,
+      ),
+  );
+
+  app.post<{ Params: { id: string }; Body: { reviewPolicy: ReviewPolicy; note?: string } }>(
+    "/cards/:id/review-policy",
+    {
+      schema: {
+        summary: "Grant or revoke the auto review policy (human-only)",
+        description:
+          "Marking a task auto is the review, amortized: the human approves the task definition once instead of every run.",
+        params: idParams,
+        body: {
+          type: "object",
+          properties: {
+            reviewPolicy: { type: "string", enum: [...REVIEW_POLICIES] },
+            note: { type: "string" },
+          },
+          required: ["reviewPolicy"],
+          additionalProperties: false,
+        },
+        response: { 200: { $ref: "Card#" }, ...mutationErrors },
+      },
+    },
+    async (request) =>
+      store.setReviewPolicy(
+        request.params.id,
+        request.body.reviewPolicy,
+        resolveActor(request),
+        request.body.note,
+      ),
+  );
+
+  app.post<{ Params: { id: string }; Body: { note: string } }>(
+    "/cards/:id/annotations",
+    {
+      schema: {
+        summary: "Annotate a card",
+        description:
+          "Any actor may annotate any card, any time — progress notes, questions, suggestions, volunteering. Annotations never require transition permission.",
+        params: idParams,
+        body: {
+          type: "object",
+          properties: { note: { type: "string", minLength: 1 } },
+          required: ["note"],
+          additionalProperties: false,
+        },
+        response: { 201: { $ref: "CardEvent#" }, ...mutationErrors },
+      },
+    },
+    async (request, reply) => {
+      const event = store.addAnnotation(
+        request.params.id,
+        request.body.note,
+        resolveActor(request),
+      );
+      return reply.code(201).send(event);
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/cards/:id/events",
+    {
+      schema: {
+        summary: "The card's full audit trail, oldest first",
+        params: idParams,
+        response: {
+          200: { type: "array", items: { $ref: "CardEvent#" } },
+          404: { $ref: "Error#" },
+        },
+      },
+    },
+    async (request) => {
+      if (store.getCard(request.params.id) === undefined) {
+        throw new NotFoundError(`no card with id ${request.params.id}`);
+      }
+      return store.listEvents(request.params.id);
+    },
+  );
+}

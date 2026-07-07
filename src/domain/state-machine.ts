@@ -92,6 +92,16 @@ export function canChangeReviewPolicy(actor: Actor): boolean {
   return actor.type === "human";
 }
 
+/**
+ * Editing a card's definition (title/description) is human-only: the
+ * definition is what the human triages and reviews — and, for an `auto`
+ * card, what the grant covers — so an agent must not be able to rewrite it.
+ * An agent proposes edits via annotation.
+ */
+export function canEditCard(actor: Actor): boolean {
+  return actor.type === "human";
+}
+
 export function canTransition(
   card: TransitionCard,
   to: CardState,

@@ -10,7 +10,7 @@ A self-hosted kanban board **shared by one human and their AI agent(s)** — one
 
 This is not a Trello clone or a general project-management tool — the design center is a human and an agent coordinating through a shared board, with delegated work reviewed before it is final.
 
-**Current phase: early scaffolding.** The API skeleton exists (TypeScript + Fastify, hello-world `/health` endpoint and test); no domain features yet. Design docs in `docs/` remain the source of truth — implement against them, and update them when a decision changes. **The build queue lives in `docs/roadmap.md`** — check it at the start of a session, and move items to Done as they finish.
+**Current phase: building the core.** The domain state machine (`src/domain/`), SQLite persistence (`src/persistence/`, event log + materialized cards), and the REST API (`src/routes/`, OpenAPI at `/openapi.json`) exist; auth is next — until then callers self-identify via interim `x-actor-type`/`x-actor-id` headers isolated in `src/routes/actor.ts`. Design docs in `docs/` remain the source of truth — implement against them, and update them when a decision changes. **The build queue lives in `docs/roadmap.md`** — check it at the start of a session, and move items to Done as they finish.
 
 ## Core concepts
 
@@ -37,7 +37,8 @@ This is not a Trello clone or a general project-management tool — the design c
 
 ## Stack
 
-- TypeScript + Node (≥20), Fastify, SQLite planned for storage. API-only for now; UI approach is still open.
+- TypeScript + Node (≥20), Fastify, SQLite via better-sqlite3 (default path `data/agent-kanban.db`, override with `DATABASE_PATH`; tests use `:memory:`), @fastify/swagger for the OpenAPI spec. API-only for now; UI approach is still open.
+- **Dependencies: pre-approved.** Adding or upgrading well-known packages needed for a roadmap item does not require asking — pick the latest stable version compatible with Node ≥20 and Fastify v5, and note the choice in the roadmap Done entry or `open-questions.md` if it embodies a design decision.
 - `npm run dev` — dev server with reload; `npm test` — Vitest; `npm run typecheck` — tsc.
 - Tests build the app via `buildApp()` from `src/app.ts` and use Fastify's `inject()` — no port binding in tests.
 
