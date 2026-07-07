@@ -2,14 +2,19 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.js";
 
-/** Interim credential headers (replaced by tokens in roadmap item 4). */
-const asHuman = { "x-actor-type": "human", "x-actor-id": "human-1" };
-const asAgent = { "x-actor-type": "agent", "x-actor-id": "agent-1" };
+const asHuman = { authorization: "Bearer human-secret" };
+const asAgent = { authorization: "Bearer agent-secret" };
 
 let app: FastifyInstance;
 
 beforeEach(async () => {
-  app = buildApp({ dbPath: ":memory:" });
+  app = buildApp({
+    dbPath: ":memory:",
+    credentials: [
+      { id: "human-1", type: "human", token: "human-secret" },
+      { id: "agent-1", type: "agent", token: "agent-secret" },
+    ],
+  });
   await app.ready();
 });
 
@@ -63,10 +68,20 @@ describe("POST /cards", () => {
     });
   });
 
-  it("rejects a request without credential headers with 401", async () => {
+  it("rejects a request without a token with 401", async () => {
     const res = await app.inject({ method: "POST", url: "/cards", payload: { title: "x" } });
     expect(res.statusCode).toBe(401);
     expect(res.json()).toHaveProperty("error");
+  });
+
+  it("rejects an unrecognized token with 401", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/cards",
+      headers: { authorization: "Bearer wrong" },
+      payload: { title: "x" },
+    });
+    expect(res.statusCode).toBe(401);
   });
 
   it("rejects a schema-invalid body with 400", async () => {
@@ -91,24 +106,33 @@ describe("GET /cards and GET /cards/:id", () => {
       payload: { executor: "agent" },
     });
 
-    const all = await app.inject({ method: "GET", url: "/cards" });
+    const all = await app.inject({ method: "GET", url: "/cards", headers: asHuman });
     expect(all.json()).toHaveLength(2);
 
-    const agents = await app.inject({ method: "GET", url: "/cards?executor=agent" });
+    const agents = await app.inject({
+      method: "GET",
+      url: "/cards?executor=agent",
+      headers: asAgent,
+    });
     expect(agents.json()).toHaveLength(1);
     expect(agents.json()[0].id).toBe(first);
 
-    const none = await app.inject({ method: "GET", url: "/cards?state=done" });
+    const none = await app.inject({ method: "GET", url: "/cards?state=done", headers: asHuman });
     expect(none.json()).toEqual([]);
   });
 
+  it("requires a token even for reads", async () => {
+    const res = await app.inject({ method: "GET", url: "/cards" });
+    expect(res.statusCode).toBe(401);
+  });
+
   it("rejects an unknown filter value with 400", async () => {
-    const res = await app.inject({ method: "GET", url: "/cards?state=bogus" });
+    const res = await app.inject({ method: "GET", url: "/cards?state=bogus", headers: asHuman });
     expect(res.statusCode).toBe(400);
   });
 
   it("returns 404 for a missing card", async () => {
-    const res = await app.inject({ method: "GET", url: "/cards/nope" });
+    const res = await app.inject({ method: "GET", url: "/cards/nope", headers: asHuman });
     expect(res.statusCode).toBe(404);
   });
 });
@@ -171,7 +195,7 @@ describe("POST /cards/:id/transition", () => {
     });
     expect(res.statusCode).toBe(403);
 
-    const card = await app.inject({ method: "GET", url: `/cards/${id}` });
+    const card = await app.inject({ method: "GET", url: `/cards/${id}`, headers: asHuman });
     expect(card.json().state).toBe("inbox");
   });
 
@@ -255,7 +279,7 @@ describe("POST /cards/:id/annotations and GET /cards/:id/events", () => {
       note: "I could take this",
     });
 
-    const events = await app.inject({ method: "GET", url: `/cards/${id}/events` });
+    const events = await app.inject({ method: "GET", url: `/cards/${id}/events`, headers: asAgent });
     expect(events.statusCode).toBe(200);
     expect(events.json().map((e: { type: string }) => e.type)).toEqual([
       "card_created",
@@ -264,17 +288,18 @@ describe("POST /cards/:id/annotations and GET /cards/:id/events", () => {
   });
 
   it("returns 404 for events of a missing card", async () => {
-    const res = await app.inject({ method: "GET", url: "/cards/nope/events" });
+    const res = await app.inject({ method: "GET", url: "/cards/nope/events", headers: asHuman });
     expect(res.statusCode).toBe(404);
   });
 });
 
 describe("GET /openapi.json", () => {
-  it("serves an OpenAPI spec covering the card routes", async () => {
+  it("serves an OpenAPI spec (no token needed) covering the card routes", async () => {
     const res = await app.inject({ method: "GET", url: "/openapi.json" });
     expect(res.statusCode).toBe(200);
     const spec = res.json();
     expect(spec.openapi).toMatch(/^3\./);
+    expect(spec.components.securitySchemes).toHaveProperty("bearerAuth");
     for (const path of [
       "/cards",
       "/cards/{id}",

@@ -10,7 +10,7 @@ A self-hosted kanban board **shared by one human and their AI agent(s)** — one
 
 This is not a Trello clone or a general project-management tool — the design center is a human and an agent coordinating through a shared board, with delegated work reviewed before it is final.
 
-**Current phase: building the core.** The domain state machine (`src/domain/`), SQLite persistence (`src/persistence/`, event log + materialized cards), and the REST API (`src/routes/`, OpenAPI at `/openapi.json`) exist; auth is next — until then callers self-identify via interim `x-actor-type`/`x-actor-id` headers isolated in `src/routes/actor.ts`. Design docs in `docs/` remain the source of truth — implement against them, and update them when a decision changes. **The build queue lives in `docs/roadmap.md`** — check it at the start of a session, and move items to Done as they finish.
+**Current phase: core built, validate it.** The domain state machine (`src/domain/`), SQLite persistence (`src/persistence/`, event log + materialized cards), REST API (`src/routes/`, OpenAPI at `/openapi.json`), and token auth (`HUMAN_TOKENS`/`AGENT_TOKENS` env vars, `id:token` pairs; all `/cards` routes require a bearer token) exist. Next: end-to-end validation — drive the board via `curl` with an agent token, dogfood the roadmap onto it. Design docs in `docs/` remain the source of truth — implement against them, and update them when a decision changes. **The build queue lives in `docs/roadmap.md`** — check it at the start of a session, and move items to Done as they finish.
 
 ## Core concepts
 

@@ -19,9 +19,16 @@ import {
   type ExecutorType,
   type ReviewPolicy,
 } from "../domain/state-machine.js";
-import { EVENT_TYPES, type CardStore } from "../persistence/card-store.js";
+import { EVENT_TYPES, type CardStore, type StoreActor } from "../persistence/card-store.js";
 import { NotFoundError } from "../persistence/card-store.js";
-import { resolveActor } from "./actor.js";
+import type { ActorResolver } from "./actor.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    /** The authenticated caller, resolved from its credential before any handler runs. */
+    actor: StoreActor;
+  }
+}
 
 const EXECUTORS = ["human", "agent", "unassigned"] as const;
 const REVIEW_POLICIES = ["reviewed", "auto"] as const;
@@ -112,10 +119,19 @@ const mutationErrors = {
 
 export interface CardRoutesOptions {
   store: CardStore;
+  resolveActor: ActorResolver;
 }
 
 export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions): Promise<void> {
-  const { store } = opts;
+  const { store, resolveActor } = opts;
+
+  // Every board route — reads included; the board is personal data —
+  // requires a credential. onRequest so an unauthenticated request is
+  // refused before its body is even parsed.
+  app.decorateRequest("actor", null as unknown as StoreActor);
+  app.addHook("onRequest", async (request) => {
+    request.actor = resolveActor(request);
+  });
 
   app.post<{ Body: { title: string; description?: string } }>(
     "/cards",
@@ -136,7 +152,7 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
       },
     },
     async (request, reply) => {
-      const card = store.createCard(request.body, resolveActor(request));
+      const card = store.createCard(request.body, request.actor);
       return reply.code(201).send(card);
     },
   );
@@ -196,7 +212,7 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
         response: { 200: { $ref: "Card#" }, ...mutationErrors },
       },
     },
-    async (request) => store.updateCard(request.params.id, request.body, resolveActor(request)),
+    async (request) => store.updateCard(request.params.id, request.body, request.actor),
   );
 
   app.post<{ Params: { id: string }; Body: { to: CardState; note?: string } }>(
@@ -220,12 +236,7 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
       },
     },
     async (request) =>
-      store.transitionCard(
-        request.params.id,
-        request.body.to,
-        resolveActor(request),
-        request.body.note,
-      ),
+      store.transitionCard(request.params.id, request.body.to, request.actor, request.body.note),
   );
 
   app.post<{ Params: { id: string }; Body: { executor: ExecutorType; note?: string } }>(
@@ -248,12 +259,7 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
       },
     },
     async (request) =>
-      store.setExecutor(
-        request.params.id,
-        request.body.executor,
-        resolveActor(request),
-        request.body.note,
-      ),
+      store.setExecutor(request.params.id, request.body.executor, request.actor, request.body.note),
   );
 
   app.post<{ Params: { id: string }; Body: { reviewPolicy: ReviewPolicy; note?: string } }>(
@@ -280,7 +286,7 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
       store.setReviewPolicy(
         request.params.id,
         request.body.reviewPolicy,
-        resolveActor(request),
+        request.actor,
         request.body.note,
       ),
   );
@@ -303,11 +309,7 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
       },
     },
     async (request, reply) => {
-      const event = store.addAnnotation(
-        request.params.id,
-        request.body.note,
-        resolveActor(request),
-      );
+      const event = store.addAnnotation(request.params.id, request.body.note, request.actor);
       return reply.code(201).send(event);
     },
   );

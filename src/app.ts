@@ -7,12 +7,19 @@ import {
   PermissionError,
   ValidationError,
 } from "./persistence/card-store.js";
-import { UnauthorizedError } from "./routes/actor.js";
+import {
+  createActorResolver,
+  credentialsFromEnv,
+  UnauthorizedError,
+  type Credential,
+} from "./routes/actor.js";
 import { apiSchemas, cardRoutes } from "./routes/cards.js";
 
 export interface BuildAppOptions {
   /** SQLite path. Defaults to DATABASE_PATH / data/agent-kanban.db; tests pass ":memory:". */
   dbPath?: string;
+  /** API credentials. Defaults to HUMAN_TOKENS / AGENT_TOKENS from the environment; the app refuses to build without at least one. */
+  credentials?: Credential[];
 }
 
 /**
@@ -21,6 +28,8 @@ export interface BuildAppOptions {
  */
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const app = Fastify({ logger: false });
+
+  const resolveActor = createActorResolver(options.credentials ?? credentialsFromEnv());
 
   const db = openDb(options.dbPath);
   const store = new CardStore(db);
@@ -54,19 +63,25 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           "Kanban board shared by one human and their AI agent(s). Actor type is derived from the credential; requests that violate the transition rules fail closed (403).",
         version: "0.0.1",
       },
+      components: {
+        securitySchemes: {
+          bearerAuth: { type: "http", scheme: "bearer" },
+        },
+      },
+      security: [{ bearerAuth: [] }],
     },
     refResolver: {
       buildLocalReference: (json) => String(json.$id),
     },
   });
 
-  app.get("/health", async () => {
+  app.get("/health", { schema: { security: [] } }, async () => {
     return { status: "ok" };
   });
 
   app.get("/openapi.json", { schema: { hide: true } }, async () => app.swagger());
 
-  app.register(cardRoutes, { store });
+  app.register(cardRoutes, { store, resolveActor });
 
   return app;
 }
