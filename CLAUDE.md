@@ -20,7 +20,7 @@ This is not a Trello clone or a general project-management tool — the design c
 - **Trusted automation is the exception, granted per task by the human.** A card marked `auto` closes directly to Done but still lives on the board: every run is a card with a full audit trail, and failures surface in Blocked. An agent can never mark work auto — only escalate an auto card back into review.
 - **Agents may annotate any card** (progress notes, suggestions, proposed breakdowns) **but may only transition cards they execute.** Ownership is enforced by the board via credentials, not by convention.
 - **Cards decompose.** A complex card breaks into child cards; each child can be kept or offloaded independently.
-- **Labels carry priority and category/project.**
+- **Labels carry `category`, `focus`, and `pending-tier`** — the human's own lane is organized by Cal Newport's Einstein Principle / Productivity Purge methodology (star 1-2 focus projects per category, everything else is `daydream` or `white-whale`), with weekly/quarterly agent-assisted ritual cards. Detail in `docs/productivity-purge.md`.
 
 ## Design principles
 

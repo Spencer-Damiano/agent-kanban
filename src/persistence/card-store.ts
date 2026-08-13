@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 import {
   canChangeExecutor,
+  canChangeLabels,
   canChangeReviewPolicy,
   canCreateCard,
   canEditCard,
@@ -22,7 +23,10 @@ import {
   isTerminal,
   type ActorType,
   type CardState,
+  type Category,
   type ExecutorType,
+  type Labels,
+  type PendingTier,
   type ReviewPolicy,
 } from "../domain/state-machine.js";
 
@@ -48,6 +52,7 @@ export interface Card {
   reviewPolicy: ReviewPolicy;
   /** For blocked/waiting cards: the state to resume to. */
   pausedFrom: CardState | null;
+  labels: Labels;
   createdAt: string;
   updatedAt: string;
 }
@@ -58,6 +63,7 @@ export const EVENT_TYPES = [
   "state_transitioned",
   "executor_changed",
   "review_policy_changed",
+  "labels_changed",
   "annotation_added",
 ] as const;
 
@@ -87,6 +93,9 @@ interface CardRow {
   executor: string;
   review_policy: string;
   paused_from: string | null;
+  category: string | null;
+  focus: number;
+  pending_tier: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -115,6 +124,11 @@ function toCard(row: CardRow): Card {
     executor: row.executor as ExecutorType,
     reviewPolicy: row.review_policy as ReviewPolicy,
     pausedFrom: row.paused_from as CardState | null,
+    labels: {
+      category: row.category as Category | null,
+      focus: row.focus === 1,
+      pendingTier: row.pending_tier as PendingTier | null,
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -140,6 +154,9 @@ function toEvent(row: EventRow): CardEvent {
 export interface CreateCardInput {
   title: string;
   description?: string;
+  category?: Category | null;
+  focus?: boolean;
+  pendingTier?: PendingTier | null;
 }
 
 export interface UpdateCardInput {
@@ -147,9 +164,17 @@ export interface UpdateCardInput {
   description?: string;
 }
 
+export interface UpdateLabelsInput {
+  category?: Category | null;
+  focus?: boolean;
+  pendingTier?: PendingTier | null;
+}
+
 export interface ListCardsFilter {
   state?: CardState;
   executor?: ExecutorType;
+  category?: Category;
+  focus?: boolean;
 }
 
 export class CardStore {
@@ -165,14 +190,17 @@ export class CardStore {
     const id = randomUUID();
     const now = new Date().toISOString();
     const description = input.description ?? "";
+    const category = input.category ?? null;
+    const focus = input.focus ?? false;
+    const pendingTier = input.pendingTier ?? null;
 
     this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO cards (id, title, description, state, executor, review_policy, paused_from, created_at, updated_at)
-           VALUES (?, ?, ?, 'inbox', 'unassigned', 'reviewed', NULL, ?, ?)`,
+          `INSERT INTO cards (id, title, description, state, executor, review_policy, paused_from, category, focus, pending_tier, created_at, updated_at)
+           VALUES (@id, @title, @description, 'inbox', 'unassigned', 'reviewed', NULL, @category, @focus, @pendingTier, @now, @now)`,
         )
-        .run(id, title, description, now, now);
+        .run({ id, title, description, category, focus: focus ? 1 : 0, pendingTier, now });
       this.appendEvent({
         cardId: id,
         type: "card_created",
@@ -180,7 +208,7 @@ export class CardStore {
         toState: "inbox",
         executor: "unassigned",
         reviewPolicy: "reviewed",
-        payload: { title, description },
+        payload: { title, description, category, focus, pendingTier },
         createdAt: now,
       });
     })();
@@ -240,7 +268,7 @@ export class CardStore {
 
   listCards(filter: ListCardsFilter = {}): Card[] {
     const clauses: string[] = [];
-    const params: string[] = [];
+    const params: (string | number)[] = [];
     if (filter.state !== undefined) {
       clauses.push("state = ?");
       params.push(filter.state);
@@ -248,6 +276,14 @@ export class CardStore {
     if (filter.executor !== undefined) {
       clauses.push("executor = ?");
       params.push(filter.executor);
+    }
+    if (filter.category !== undefined) {
+      clauses.push("category = ?");
+      params.push(filter.category);
+    }
+    if (filter.focus !== undefined) {
+      clauses.push("focus = ?");
+      params.push(filter.focus ? 1 : 0);
     }
     const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.db
@@ -360,6 +396,51 @@ export class CardStore {
     return this.mustGet(id);
   }
 
+  /** Update one or more label facets on a card — human-only. */
+  setLabels(id: string, input: UpdateLabelsInput, actor: StoreActor): Card {
+    if (!canChangeLabels({ type: actor.type })) {
+      throw new PermissionError("only a human may change a card's labels");
+    }
+    const card = this.mustGet(id);
+    if (isTerminal(card.state)) {
+      throw new ValidationError(`cannot label a ${card.state} card`);
+    }
+    if (
+      input.category === undefined &&
+      input.focus === undefined &&
+      input.pendingTier === undefined
+    ) {
+      throw new ValidationError(
+        "a label update requires at least one of: category, focus, pendingTier",
+      );
+    }
+
+    const newCategory = input.category !== undefined ? input.category : card.labels.category;
+    const newFocus = input.focus !== undefined ? input.focus : card.labels.focus;
+    const newPendingTier =
+      input.pendingTier !== undefined ? input.pendingTier : card.labels.pendingTier;
+    const now = new Date().toISOString();
+
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE cards SET category = ?, focus = ?, pending_tier = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(newCategory, newFocus ? 1 : 0, newPendingTier, now, id);
+      this.appendEvent({
+        cardId: id,
+        type: "labels_changed",
+        actor,
+        executor: card.executor,
+        reviewPolicy: card.reviewPolicy,
+        payload: { category: newCategory, focus: newFocus, pendingTier: newPendingTier },
+        createdAt: now,
+      });
+    })();
+
+    return this.mustGet(id);
+  }
+
   /**
    * Any actor may annotate any card, any time — progress notes, questions,
    * suggestions, volunteering. Annotations never require transition
@@ -404,28 +485,28 @@ export class CardStore {
     toState?: CardState;
     executor: ExecutorType;
     reviewPolicy: ReviewPolicy;
-    note?: string | undefined;
+    note?: string;
     payload?: Record<string, unknown>;
     createdAt: string;
   }): number {
     const result = this.db
       .prepare(
         `INSERT INTO events (card_id, type, actor_id, actor_type, from_state, to_state, executor, review_policy, note, payload, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (@cardId, @type, @actorId, @actorType, @fromState, @toState, @executor, @reviewPolicy, @note, @payload, @createdAt)`,
       )
-      .run(
-        event.cardId,
-        event.type,
-        event.actor.id,
-        event.actor.type,
-        event.fromState ?? null,
-        event.toState ?? null,
-        event.executor,
-        event.reviewPolicy,
-        event.note ?? null,
-        event.payload === undefined ? null : JSON.stringify(event.payload),
-        event.createdAt,
-      );
+      .run({
+        cardId: event.cardId,
+        type: event.type,
+        actorId: event.actor.id,
+        actorType: event.actor.type,
+        fromState: event.fromState ?? null,
+        toState: event.toState ?? null,
+        executor: event.executor,
+        reviewPolicy: event.reviewPolicy,
+        note: event.note ?? null,
+        payload: event.payload === undefined ? null : JSON.stringify(event.payload),
+        createdAt: event.createdAt,
+      });
     return Number(result.lastInsertRowid);
   }
 }
@@ -438,64 +519,71 @@ export class CardStore {
 export function rebuildProjection(db: Db): void {
   db.transaction(() => {
     db.prepare("DELETE FROM cards").run();
-    const insert = db.prepare(
-      `INSERT INTO cards (id, title, description, state, executor, review_policy, paused_from, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+
+    const insertCard = db.prepare(
+      `INSERT INTO cards (id, title, description, state, executor, review_policy, paused_from, category, focus, pending_tier, created_at, updated_at)
+       VALUES (@id, @title, @description, @state, @executor, @reviewPolicy, @pausedFrom, @category, @focus, @pendingTier, @createdAt, @updatedAt)`,
     );
+    const updateContent = db.prepare(
+      "UPDATE cards SET title = ?, description = ?, updated_at = ? WHERE id = ?",
+    );
+    const updateState = db.prepare(
+      "UPDATE cards SET state = ?, paused_from = ?, updated_at = ? WHERE id = ?",
+    );
+    const updateExecutor = db.prepare(
+      "UPDATE cards SET executor = ?, updated_at = ? WHERE id = ?",
+    );
+    const updateReviewPolicy = db.prepare(
+      "UPDATE cards SET review_policy = ?, updated_at = ? WHERE id = ?",
+    );
+    const updateLabels = db.prepare(
+      "UPDATE cards SET category = ?, focus = ?, pending_tier = ?, updated_at = ? WHERE id = ?",
+    );
+
     const rows = db.prepare("SELECT * FROM events ORDER BY id").all() as EventRow[];
     for (const row of rows) {
       const event = toEvent(row);
       switch (event.type) {
         case "card_created": {
-          const payload = event.payload ?? {};
-          insert.run(
-            event.cardId,
-            String(payload.title ?? ""),
-            String(payload.description ?? ""),
-            event.toState,
-            event.executor,
-            event.reviewPolicy,
-            null,
-            event.createdAt,
-            event.createdAt,
-          );
+          const p = event.payload ?? {};
+          insertCard.run({
+            id: event.cardId,
+            title: String(p.title ?? ""),
+            description: String(p.description ?? ""),
+            state: event.toState,
+            executor: event.executor,
+            reviewPolicy: event.reviewPolicy,
+            pausedFrom: null,
+            category: p.category ?? null,
+            focus: p.focus ? 1 : 0,
+            pendingTier: p.pendingTier ?? null,
+            createdAt: event.createdAt,
+            updatedAt: event.createdAt,
+          });
           break;
         }
         case "card_updated": {
-          const payload = event.payload ?? {};
-          db.prepare("UPDATE cards SET title = ?, description = ?, updated_at = ? WHERE id = ?").run(
-            String(payload.title ?? ""),
-            String(payload.description ?? ""),
-            event.createdAt,
-            event.cardId,
-          );
+          const p = event.payload ?? {};
+          updateContent.run(String(p.title ?? ""), String(p.description ?? ""), event.createdAt, event.cardId);
           break;
         }
         case "state_transitioned": {
           const pausedFrom =
             event.toState === "blocked" || event.toState === "waiting" ? event.fromState : null;
-          db.prepare("UPDATE cards SET state = ?, paused_from = ?, updated_at = ? WHERE id = ?").run(
-            event.toState,
-            pausedFrom,
-            event.createdAt,
-            event.cardId,
-          );
+          updateState.run(event.toState, pausedFrom, event.createdAt, event.cardId);
           break;
         }
         case "executor_changed":
-          db.prepare("UPDATE cards SET executor = ?, updated_at = ? WHERE id = ?").run(
-            event.executor,
-            event.createdAt,
-            event.cardId,
-          );
+          updateExecutor.run(event.executor, event.createdAt, event.cardId);
           break;
         case "review_policy_changed":
-          db.prepare("UPDATE cards SET review_policy = ?, updated_at = ? WHERE id = ?").run(
-            event.reviewPolicy,
-            event.createdAt,
-            event.cardId,
-          );
+          updateReviewPolicy.run(event.reviewPolicy, event.createdAt, event.cardId);
           break;
+        case "labels_changed": {
+          const p = event.payload ?? {};
+          updateLabels.run(p.category ?? null, p.focus ? 1 : 0, p.pendingTier ?? null, event.createdAt, event.cardId);
+          break;
+        }
         case "annotation_added":
           // Annotations live only in the event log.
           break;

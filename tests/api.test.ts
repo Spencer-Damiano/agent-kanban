@@ -293,6 +293,116 @@ describe("POST /cards/:id/annotations and GET /cards/:id/events", () => {
   });
 });
 
+describe("POST /cards/:id/labels", () => {
+  it("sets label facets and returns the updated card", async () => {
+    const id = await createCard();
+    const res = await app.inject({
+      method: "POST",
+      url: `/cards/${id}/labels`,
+      headers: asHuman,
+      payload: { category: "professional", focus: true, pendingTier: "white-whale" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().labels).toEqual({
+      category: "professional",
+      focus: true,
+      pendingTier: "white-whale",
+    });
+  });
+
+  it("allows partial updates — omitted facets are preserved", async () => {
+    const id = await createCard();
+    await app.inject({
+      method: "POST",
+      url: `/cards/${id}/labels`,
+      headers: asHuman,
+      payload: { category: "personal" },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/cards/${id}/labels`,
+      headers: asHuman,
+      payload: { focus: true },
+    });
+    expect(res.json().labels).toMatchObject({ category: "personal", focus: true });
+  });
+
+  it("accepts null to clear a facet", async () => {
+    const id = await createCard();
+    await app.inject({
+      method: "POST",
+      url: `/cards/${id}/labels`,
+      headers: asHuman,
+      payload: { category: "community" },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/cards/${id}/labels`,
+      headers: asHuman,
+      payload: { category: null },
+    });
+    expect(res.json().labels.category).toBeNull();
+  });
+
+  it("refuses an agent with 403", async () => {
+    const id = await createCard();
+    const res = await app.inject({
+      method: "POST",
+      url: `/cards/${id}/labels`,
+      headers: asAgent,
+      payload: { focus: true },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("rejects an empty body with 400", async () => {
+    const id = await createCard();
+    const res = await app.inject({
+      method: "POST",
+      url: `/cards/${id}/labels`,
+      headers: asHuman,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("labels can be set at card creation time", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/cards",
+      headers: asHuman,
+      payload: { title: "project", category: "professional", focus: true },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().labels).toMatchObject({ category: "professional", focus: true });
+  });
+
+  it("filters by category and focus via GET /cards", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/cards",
+      headers: asHuman,
+      payload: { title: "focused work", category: "professional", focus: true },
+    });
+    await createCard("other work");
+
+    const focused = await app.inject({
+      method: "GET",
+      url: "/cards?focus=true",
+      headers: asHuman,
+    });
+    expect(focused.json()).toHaveLength(1);
+    expect(focused.json()[0].title).toBe("focused work");
+
+    const professional = await app.inject({
+      method: "GET",
+      url: "/cards?category=professional",
+      headers: asHuman,
+    });
+    expect(professional.json()).toHaveLength(1);
+  });
+});
+
 describe("GET /openapi.json", () => {
   it("serves an OpenAPI spec (no token needed) covering the card routes", async () => {
     const res = await app.inject({ method: "GET", url: "/openapi.json" });
@@ -306,6 +416,7 @@ describe("GET /openapi.json", () => {
       "/cards/{id}/transition",
       "/cards/{id}/executor",
       "/cards/{id}/review-policy",
+      "/cards/{id}/labels",
       "/cards/{id}/annotations",
       "/cards/{id}/events",
     ]) {

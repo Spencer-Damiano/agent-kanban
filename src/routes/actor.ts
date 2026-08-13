@@ -1,15 +1,13 @@
 /**
- * Credential-based actor resolution (roadmap item 4).
- *
- * The state machine's permission rules are keyed off the actor type of the
- * caller, so the API derives it from the authenticated credential — never
- * from anything the request claims about itself. v1 credentials are static
- * bearer tokens from config: each token is bound to an actor id and type
- * when the server starts, and a request is whoever its token says it is.
+ * Credential-based actor resolution. The state machine's permission rules are
+ * keyed off the actor type of the caller, so the API derives it from the
+ * authenticated credential — never from anything the request claims about
+ * itself. Credentials are static bearer tokens bound to an actor id and type
+ * at startup; a request is whoever its token says it is.
  *
  * Config: HUMAN_TOKENS and AGENT_TOKENS env vars, each a comma-separated
  * list of `id:token` pairs, e.g. `HUMAN_TOKENS="alex:s3cret"`. Rotation is
- * editing the config and restarting — fine for a self-hosted v1.
+ * editing the config and restarting.
  */
 
 import type { FastifyRequest } from "fastify";

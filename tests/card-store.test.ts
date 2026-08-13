@@ -227,6 +227,75 @@ describe("listCards", () => {
   });
 });
 
+describe("labels", () => {
+  it("cards start with null labels and focus=false by default", () => {
+    const card = store.createCard({ title: "plain" }, human);
+    expect(card.labels).toEqual({ category: null, focus: false, pendingTier: null });
+  });
+
+  it("labels can be set at creation time", () => {
+    const card = store.createCard(
+      { title: "project", category: "professional", focus: true, pendingTier: "white-whale" },
+      human,
+    );
+    expect(card.labels).toEqual({ category: "professional", focus: true, pendingTier: "white-whale" });
+  });
+
+  it("setLabels updates label facets and records a labels_changed event", () => {
+    const card = store.createCard({ title: "task" }, human);
+    const updated = store.setLabels(card.id, { category: "personal", focus: true }, human);
+    expect(updated.labels).toEqual({ category: "personal", focus: true, pendingTier: null });
+
+    const events = store.listEvents(card.id);
+    expect(events.at(-1)).toMatchObject({
+      type: "labels_changed",
+      actorType: "human",
+      payload: { category: "personal", focus: true, pendingTier: null },
+    });
+  });
+
+  it("setLabels is partial — omitted facets are preserved", () => {
+    const card = store.createCard(
+      { title: "task", category: "community", pendingTier: "daydream" },
+      human,
+    );
+    const updated = store.setLabels(card.id, { focus: true }, human);
+    expect(updated.labels).toEqual({ category: "community", focus: true, pendingTier: "daydream" });
+  });
+
+  it("null clears a label facet", () => {
+    const card = store.createCard({ title: "task", category: "personal" }, human);
+    const updated = store.setLabels(card.id, { category: null }, human);
+    expect(updated.labels.category).toBeNull();
+  });
+
+  it("only a human may change labels", () => {
+    const card = store.createCard({ title: "task" }, human);
+    expect(() => store.setLabels(card.id, { focus: true }, agent)).toThrow(PermissionError);
+  });
+
+  it("cannot label a terminal card", () => {
+    const card = store.createCard({ title: "task" }, human);
+    store.transitionCard(card.id, "cancelled", human);
+    expect(() => store.setLabels(card.id, { focus: true }, human)).toThrow(ValidationError);
+  });
+
+  it("rejects an empty label update", () => {
+    const card = store.createCard({ title: "task" }, human);
+    expect(() => store.setLabels(card.id, {}, human)).toThrow(ValidationError);
+  });
+
+  it("listCards filters by category and focus", () => {
+    store.createCard({ title: "a", category: "professional", focus: true }, human);
+    store.createCard({ title: "b", category: "personal" }, human);
+    store.createCard({ title: "c" }, human);
+
+    expect(store.listCards({ category: "professional" }).map((c) => c.title)).toEqual(["a"]);
+    expect(store.listCards({ focus: true }).map((c) => c.title)).toEqual(["a"]);
+    expect(store.listCards({ focus: false })).toHaveLength(2);
+  });
+});
+
 describe("rebuildProjection", () => {
   it("reconstructs the cards table from the event log alone", () => {
     // Build varied history: a finished delegated card, a paused card, an
@@ -244,6 +313,17 @@ describe("rebuildProjection", () => {
 
     const before = store.listCards();
     db.prepare("UPDATE cards SET state = 'inbox', executor = 'unassigned'").run(); // corrupt it
+    rebuildProjection(db);
+    expect(store.listCards()).toEqual(before);
+  });
+
+  it("reconstructs labels (including labels_changed events) correctly", () => {
+    const card = store.createCard({ title: "project", category: "professional" }, human);
+    store.setLabels(card.id, { focus: true, pendingTier: "white-whale" }, human);
+    store.setLabels(card.id, { pendingTier: null }, human);
+
+    const before = store.listCards();
+    db.prepare("UPDATE cards SET category = NULL, focus = 0, pending_tier = NULL").run();
     rebuildProjection(db);
     expect(store.listCards()).toEqual(before);
   });

@@ -15,12 +15,22 @@
 import type { FastifyInstance } from "fastify";
 import {
   CARD_STATES,
+  CATEGORIES,
+  EXECUTORS,
+  PENDING_TIERS,
+  REVIEW_POLICIES,
   type CardState,
+  type Category,
   type ExecutorType,
+  type PendingTier,
   type ReviewPolicy,
 } from "../domain/state-machine.js";
-import { EVENT_TYPES, type CardStore, type StoreActor } from "../persistence/card-store.js";
-import { NotFoundError } from "../persistence/card-store.js";
+import {
+  EVENT_TYPES,
+  NotFoundError,
+  type CardStore,
+  type StoreActor,
+} from "../persistence/card-store.js";
 import type { ActorResolver } from "./actor.js";
 
 declare module "fastify" {
@@ -30,8 +40,6 @@ declare module "fastify" {
   }
 }
 
-const EXECUTORS = ["human", "agent", "unassigned"] as const;
-const REVIEW_POLICIES = ["reviewed", "auto"] as const;
 
 const cardSchema = {
   $id: "Card",
@@ -44,6 +52,15 @@ const cardSchema = {
     executor: { type: "string", enum: [...EXECUTORS] },
     reviewPolicy: { type: "string", enum: [...REVIEW_POLICIES] },
     pausedFrom: { type: ["string", "null"], enum: [...CARD_STATES, null] },
+    labels: {
+      type: "object",
+      properties: {
+        category: { type: ["string", "null"], enum: [...CATEGORIES, null] },
+        focus: { type: "boolean" },
+        pendingTier: { type: ["string", "null"], enum: [...PENDING_TIERS, null] },
+      },
+      required: ["category", "focus", "pendingTier"],
+    },
     createdAt: { type: "string", format: "date-time" },
     updatedAt: { type: "string", format: "date-time" },
   },
@@ -55,6 +72,7 @@ const cardSchema = {
     "executor",
     "reviewPolicy",
     "pausedFrom",
+    "labels",
     "createdAt",
     "updatedAt",
   ],
@@ -133,7 +151,15 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
     request.actor = resolveActor(request);
   });
 
-  app.post<{ Body: { title: string; description?: string } }>(
+  app.post<{
+    Body: {
+      title: string;
+      description?: string;
+      category?: Category;
+      focus?: boolean;
+      pendingTier?: PendingTier;
+    };
+  }>(
     "/cards",
     {
       schema: {
@@ -144,6 +170,9 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
           properties: {
             title: { type: "string", minLength: 1 },
             description: { type: "string" },
+            category: { type: "string", enum: [...CATEGORIES] },
+            focus: { type: "boolean" },
+            pendingTier: { type: "string", enum: [...PENDING_TIERS] },
           },
           required: ["title"],
           additionalProperties: false,
@@ -157,16 +186,20 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
     },
   );
 
-  app.get<{ Querystring: { state?: CardState; executor?: ExecutorType } }>(
+  app.get<{
+    Querystring: { state?: CardState; executor?: ExecutorType; category?: Category; focus?: boolean };
+  }>(
     "/cards",
     {
       schema: {
-        summary: "List cards, optionally filtered by state and/or executor",
+        summary: "List cards, optionally filtered by state, executor, category, and/or focus",
         querystring: {
           type: "object",
           properties: {
             state: { type: "string", enum: [...CARD_STATES] },
             executor: { type: "string", enum: [...EXECUTORS] },
+            category: { type: "string", enum: [...CATEGORIES] },
+            focus: { type: "boolean" },
           },
           additionalProperties: false,
         },
@@ -289,6 +322,33 @@ export async function cardRoutes(app: FastifyInstance, opts: CardRoutesOptions):
         request.actor,
         request.body.note,
       ),
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: { category?: Category | null; focus?: boolean; pendingTier?: PendingTier | null };
+  }>(
+    "/cards/:id/labels",
+    {
+      schema: {
+        summary: "Update a card's labels (human-only)",
+        description:
+          "Set any combination of category, focus, and pending-tier. Send null to clear a facet. Partial updates are allowed — omit any facet to leave it unchanged.",
+        params: idParams,
+        body: {
+          type: "object",
+          properties: {
+            category: { type: ["string", "null"], enum: [...CATEGORIES, null] },
+            focus: { type: "boolean" },
+            pendingTier: { type: ["string", "null"], enum: [...PENDING_TIERS, null] },
+          },
+          minProperties: 1,
+          additionalProperties: false,
+        },
+        response: { 200: { $ref: "Card#" }, ...mutationErrors },
+      },
+    },
+    async (request) => store.setLabels(request.params.id, request.body, request.actor),
   );
 
   app.post<{ Params: { id: string }; Body: { note: string } }>(

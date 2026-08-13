@@ -22,8 +22,24 @@ export const CARD_STATES = [
 export type CardState = (typeof CARD_STATES)[number];
 
 export type ActorType = "human" | "agent" | "system";
-export type ExecutorType = "human" | "agent" | "unassigned";
-export type ReviewPolicy = "reviewed" | "auto";
+
+export const EXECUTORS = ["human", "agent", "unassigned"] as const;
+export type ExecutorType = (typeof EXECUTORS)[number];
+
+export const REVIEW_POLICIES = ["reviewed", "auto"] as const;
+export type ReviewPolicy = (typeof REVIEW_POLICIES)[number];
+
+export const CATEGORIES = ["professional", "community", "personal"] as const;
+export type Category = (typeof CATEGORIES)[number];
+
+export const PENDING_TIERS = ["daydream", "white-whale"] as const;
+export type PendingTier = (typeof PENDING_TIERS)[number];
+
+export interface Labels {
+  category: Category | null;
+  focus: boolean;
+  pendingTier: PendingTier | null;
+}
 
 export interface Actor {
   type: ActorType;
@@ -99,6 +115,11 @@ export function canChangeReviewPolicy(actor: Actor): boolean {
  * An agent proposes edits via annotation.
  */
 export function canEditCard(actor: Actor): boolean {
+  return actor.type === "human";
+}
+
+/** Label changes (category, focus, pending-tier) are the human's planning act. */
+export function canChangeLabels(actor: Actor): boolean {
   return actor.type === "human";
 }
 

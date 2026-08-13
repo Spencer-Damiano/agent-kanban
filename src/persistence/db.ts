@@ -23,12 +23,17 @@ CREATE TABLE cards (
   executor      TEXT NOT NULL,
   review_policy TEXT NOT NULL,
   paused_from   TEXT,
+  category      TEXT,
+  focus         INTEGER NOT NULL DEFAULT 0,
+  pending_tier  TEXT,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
 
 CREATE INDEX cards_state    ON cards(state);
 CREATE INDEX cards_executor ON cards(executor);
+CREATE INDEX cards_category ON cards(category);
+CREATE INDEX cards_focus    ON cards(focus);
 
 CREATE TABLE events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +51,14 @@ CREATE TABLE events (
 );
 
 CREATE INDEX events_card ON events(card_id, id);
+`;
+
+const MIGRATION_V2 = `
+ALTER TABLE cards ADD COLUMN category TEXT;
+ALTER TABLE cards ADD COLUMN focus INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cards ADD COLUMN pending_tier TEXT;
+CREATE INDEX cards_category ON cards(category);
+CREATE INDEX cards_focus    ON cards(focus);
 `;
 
 /**
@@ -67,7 +80,12 @@ function migrate(db: Db): void {
     const version = db.pragma("user_version", { simple: true }) as number;
     if (version < 1) {
       db.exec(SCHEMA);
-      db.pragma("user_version = 1");
+      db.pragma("user_version = 2");
+      return;
+    }
+    if (version < 2) {
+      db.exec(MIGRATION_V2);
+      db.pragma("user_version = 2");
     }
   });
   apply();
